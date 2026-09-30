@@ -1,5 +1,9 @@
 ﻿/**
- * Seeds a development database with realistic sample data.
+ * RESETS and seeds the database with realistic sample data.
+ *
+ * `pnpm db:seed` is destructive by design: it truncates every application table and
+ * recreates the dataset deterministically, all in one transaction. Running it twice gives
+ * the same database, never duplicates. The migrations journal is left untouched.
  *
  * Two things this seed does deliberately, both of which matter when you build the UI:
  *
@@ -12,11 +16,16 @@
  *    named A9/A10, and names with apostrophes and non-ASCII characters. If your UI only
  *    works on the tidy rows, these will catch it.
  *
- * No real personal data (DATA-SEED-02) â€” every name, phone and email here is invented.
+ * No real personal data (DATA-SEED-02) — every name, phone and email here is invented.
  * The data is deterministic, so everyone sees identical results and bug reports match.
  */
+// Must stay first: config/env reads process.env at import time.
+import 'dotenv/config';
+
 import { basename } from 'node:path';
 
+import { getTableName, is, sql } from 'drizzle-orm';
+import { PgTable, type PgDatabase, type PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
@@ -55,7 +64,7 @@ const FIRST_NAMES = [
   'Naomi', 'Nathan', 'Noah', 'Priya', 'Rachel', 'Reuben', 'Ruth', 'Samuel',
   'Sarah', 'Seth', 'Silas', 'Simeon', 'Tabitha', 'Thomas', 'Timothy', 'Zipporah',
   // Deliberately awkward: non-ASCII and an accented character.
-  'ZoÃ«', 'JosÃ©', 'AÃ­ne',
+  'Zoë', 'José', 'Aíne',
 ];
 
 const LAST_NAMES = [
@@ -67,11 +76,24 @@ const LAST_NAMES = [
   "O'Brien", "D'Souza",
 ];
 
-type SeedDb = ReturnType<typeof drizzle>;
+// Accepts a transaction as well as a top-level connection.
+type SeedDb = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 /**
- * Inserts the sample dataset. Exported so tests can run it against a throwaway
- * database â€” seed data that has never actually been inserted is not seed data.
+ * Empties every table defined in the schema and restarts their ID sequences, so the
+ * seed produces identical IDs on every run. CASCADE covers the foreign keys.
+ */
+export async function reset(db: SeedDb) {
+  const tableNames = Object.values(schema as Record<string, unknown>)
+    .filter((value): value is PgTable => is(value, PgTable))
+    .map((table) => `"${getTableName(table)}"`);
+
+  await db.execute(sql.raw(`TRUNCATE TABLE ${tableNames.join(', ')} RESTART IDENTITY CASCADE`));
+}
+
+/**
+ * Inserts the sample dataset into an EMPTY database. Exported so tests can run it against
+ * a throwaway database — seed data that has never actually been inserted is not seed data.
  */
 export async function seed(db: SeedDb) {
   console.log('Seeding...');
@@ -122,7 +144,7 @@ export async function seed(db: SeedDb) {
         topic: topic!,
         speaker: speaker!,
         reference: reference!,
-        outline: `Outline for "${topic}" â€” to be filled in by the speaker.`,
+        outline: `Outline for "${topic}" — to be filled in by the speaker.`,
         sortOrder: i,
       })),
     )
@@ -157,6 +179,11 @@ export async function seed(db: SeedDb) {
     // appear to end before it begins unless you handle it.
     { day: 1, start: '23:00', end: '24:30', title: 'Late Night Worship', category: 'worship' },
 
+    // STARTS AT 00:00 ON DAY 3 — not a midnight-crossing event (that is Late Night
+    // Worship above). It exists to test the 12am/12pm boundary the legacy parser got
+    // wrong: it must render as 12:00 am, first on Day 3, and overlaps the tail of
+    // Late Night Worship (ends 00:30).
+    { day: 2, start: '00:00', end: '00:45', title: 'Midnight Prayer Watch', category: 'prayer' },
     { day: 2, start: '06:30', end: '07:15', title: 'Morning Prayer', category: 'prayer' },
     { day: 2, start: '08:00', end: '09:00', title: 'Breakfast', category: 'meal' },
     { day: 2, start: '09:30', end: '11:00', title: 'Session 4', category: 'session', session: 3 },
@@ -165,8 +192,6 @@ export async function seed(db: SeedDb) {
     { day: 2, start: '15:00', end: '17:00', title: 'Free Time', category: 'free_time' },
     { day: 2, start: '19:00', end: '20:00', title: 'Dinner', category: 'meal' },
     { day: 2, start: '20:30', end: '22:30', title: 'Closing Session', category: 'session', session: 4 },
-    // MIDNIGHT EXACTLY â€” the 12am/12pm boundary that the legacy parser got wrong.
-    { day: 2, start: '00:00', end: '00:45', title: 'Midnight Prayer Watch', category: 'prayer' },
   ];
 
   await db.insert(schema.event).values(
@@ -247,7 +272,7 @@ export async function seed(db: SeedDb) {
       campId,
       name,
       gender: index % 2 === 0 ? 'male' : 'female',
-      // Fictional numbers, and only on some rows â€” the UI must handle missing
+      // Fictional numbers, and only on some rows — the UI must handle missing
       // contact details rather than rendering "undefined".
       phone: index % 3 === 0 ? `+91 98${String(100000 + index).slice(0, 6)}` : null,
       email: index % 5 === 0 ? `person${index}@example.invalid` : null,
@@ -270,7 +295,7 @@ export async function seed(db: SeedDb) {
 
   // --- Two by Two -------------------------------------------------------
   // Pairings for days 2 and 3. With an odd number of participants one group has
-  // three members â€” the schema models a pairing as a group of partners rather than
+  // three members — the schema models a pairing as a group of partners rather than
   // two columns precisely so this is representable (FR-2X2-04).
   for (const dayIndex of [1, 2]) {
     const shuffled = [...people];
@@ -279,7 +304,7 @@ export async function seed(db: SeedDb) {
       [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
     }
 
-    // 61 participants â€” deliberately odd, so the last group is a three.
+    // 61 participants — deliberately odd, so the last group is a three.
     const participants = shuffled.slice(0, 61);
 
     for (let i = 0; i < participants.length; i += 2) {
@@ -377,6 +402,14 @@ export async function seed(db: SeedDb) {
       title: 'Game Rules',
       sections: [['Safety first', 'Report any injury to your team SPOC immediately.']],
     },
+    {
+      key: 'venue',
+      title: 'Venue',
+      sections: [
+        ['Getting there', 'The retreat centre is a 10-minute drive from Munnar town. Buses leave the town stand every hour.'],
+        ['On site', 'Block A houses the main hall and dining room; Block B is accommodation only.'],
+      ],
+    },
   ];
 
   for (const def of pageDefs) {
@@ -402,10 +435,10 @@ export async function seed(db: SeedDb) {
     ['Logistics', [['Thomas Kurian', 'Transport'], ['Grace Ninan', 'Kitchen']]],
   ];
 
-  for (const [categoryName, entries] of contactGroups) {
+  for (const [categoryIndex, [categoryName, entries]] of contactGroups.entries()) {
     const [category] = await db
       .insert(schema.contactCategory)
-      .values({ campId, name: categoryName, sortOrder: contactGroups.length })
+      .values({ campId, name: categoryName, sortOrder: categoryIndex })
       .returning();
 
     await db.insert(schema.contact).values(
@@ -470,9 +503,16 @@ async function main() {
   }
 
   const client = postgres(env.DATABASE_URL, { max: 1 });
+  const db = drizzle(client, { schema });
+
+  console.log(`Resetting ALL data in ${new URL(env.DATABASE_URL).host} ...`);
 
   try {
-    await seed(drizzle(client, { schema }));
+    // One transaction: a failed seed rolls back and leaves the previous data intact.
+    await db.transaction(async (tx) => {
+      await reset(tx);
+      await seed(tx);
+    });
   } finally {
     await client.end();
   }
